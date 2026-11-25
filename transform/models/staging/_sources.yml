@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Untouched FHIR resources loaded by scripts/ingest_fhir.py"
+    schema: raw
+    tables:
+      - name: fhir_resources
+        description: "One row per FHIR resource, with the full resource stored as JSON"
+        

@@ -1,7 +1,7 @@
 """
 Load Synthea FHIR bundles into DuckDB as raw, untouched JSON.
 
-One row per FHIR resources. Nothing gets cleaned here on purpose:
+One row per FHIR resource. Nothing gets cleaned here on purpose:
 cleaning happens later in dbt, so the raw layer is always a faithful
 copy of what the source system sent us (ELT, not ETL).
 """
@@ -17,20 +17,22 @@ import pandas as pd
 # no matter which folder you run it from.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FHIR_DIR = PROJECT_ROOT / "data" / "raw" / "fhir"
-DB_PATH = PROJECT_ROOT  / "data"/ "warehouse.duckdb"
+DB_PATH = PROJECT_ROOT / "data" / "warehouse.duckdb"
+
 
 def find_patient_id(bundle: dict) -> str | None:
-    """Return the Patient id in this bundle, or None of the shared files
+    """Return the Patient id in this bundle, or None for shared files
     like hospitalInformation and practitionerInformation."""
     for entry in bundle.get("entry", []):
-        resources = entry.get("resource", {})
-        if resources.get("resourceType") == "Patient":
-            return resources.get("id")
+        resource = entry.get("resource", {})
+        if resource.get("resourceType") == "Patient":
+            return resource.get("id")
     return None
 
+
 def bundle_to_rows(path: Path, loaded_at: datetime) -> list[dict]:
-    """Turn on FHIR Bundle file into a list of rows, one per resource."""
-    with  path.open(encoding="utf-8") as f:
+    """Turn one FHIR Bundle file into a list of rows, one per resource."""
+    with path.open(encoding="utf-8") as f:
         bundle = json.load(f)
 
     patient_id = find_patient_id(bundle)
@@ -52,11 +54,12 @@ def bundle_to_rows(path: Path, loaded_at: datetime) -> list[dict]:
         )
     return rows
 
+
 def main() -> None:
-    files - sorted(FHIR_DIR.glb("*.json"))
+    files = sorted(FHIR_DIR.glob("*.json"))
     if not files:
         raise SystemExit(f"No JSON files found in {FHIR_DIR}. Did Synthea run?")
-    
+
     print(f"Found {len(files)} bundle files in {FHIR_DIR}")
 
     con = duckdb.connect(str(DB_PATH))
@@ -68,12 +71,12 @@ def main() -> None:
     con.execute(
         """
         CREATE OR REPLACE TABLE raw.fhir_resources (
-            resource_id     VARCHAR,
-            resource_type   VARCHAR,
-            patient_id      VARCHAR,
-            source_file     VARCHAR,
-            resource_json   JSON,
-            loaded_at       TIMESTAMP
+            resource_id    VARCHAR,
+            resource_type  VARCHAR,
+            patient_id     VARCHAR,
+            source_file    VARCHAR,
+            resource_json  JSON,
+            loaded_at      TIMESTAMP
         )
         """
     )
@@ -86,7 +89,7 @@ def main() -> None:
     for i, path in enumerate(files, start=1):
         try:
             rows = bundle_to_rows(path, loaded_at)
-        except (json.JSONDecodedError, UnicodeDecodeError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             # One bad file shouldn't kill the whole load. Record it and move on.
             failed.append((path.name, str(e)))
             continue
@@ -98,21 +101,44 @@ def main() -> None:
             con.register("batch_df", batch)
             con.execute(
                 """
-                SELECT resource_type, COUNT(*) AS n
-                FROM raw.fhir_reources
-                GROUP BY n DESC
+                INSERT INTO raw.fhir_resources
+                SELECT
+                    resource_id,
+                    resource_type,
+                    patient_id,
+                    source_file,
+                    CAST(resource_json AS JSON),
+                    loaded_at
+                FROM batch_df
                 """
-            ).fetchall()
-            for resource_type, n in counts:
-                print(f" {resource_type:<28} {n:>10,}")
+            )
+            con.unregister("batch_df")
+            total += len(rows)
 
-            if failed:
-                print(f"\nWARNING: {len(failed)} files failed to parse:")
-                for name, err in failed:
-                    print(f" {name}: {err}")
+        if i % 25 == 0 or i == len(files):
+            print(f"  {i}/{len(files)} files loaded, {total:,} resources so far")
 
-            con.close()
+    print(f"\nDone. Loaded {total:,} resources into raw.fhir_resources")
+
+    print("\nResources by type:")
+    counts = con.execute(
+        """
+        SELECT resource_type, COUNT(*) AS n
+        FROM raw.fhir_resources
+        GROUP BY resource_type
+        ORDER BY n DESC
+        """
+    ).fetchall()
+    for resource_type, n in counts:
+        print(f"  {resource_type:<28} {n:>10,}")
+
+    if failed:
+        print(f"\nWARNING: {len(failed)} files failed to parse:")
+        for name, err in failed:
+            print(f"  {name}: {err}")
+
+    con.close()
 
 
-        if __name__ == "__main__":
-            main()
+if __name__ == "__main__":
+    main()
